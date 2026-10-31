@@ -1,59 +1,96 @@
-# StyleTTS 2 Fine-Tune: Long-Form Narration Voice
+# Fine-tuning StyleTTS 2 for long-form narration from a very small single-speaker corpus
 
-A single-speaker narration voice built by full fine-tuning of StyleTTS 2, for a daily Torah-study publication whose English text is dense with transliterated Hebrew and Aramaic. Corpus construction under an SNR gate, a staged 100-epoch training run on rented GPU, and acceptance on an 8 min 41 s continuous generation rather than on cherry-picked clips.
+A research write-up. **Author:** [Darshan Tiwari](https://digitb.tech) (DigitB) · **Date:** Jan 2025 · **Full case study:** https://digitb.tech/case-study/hebrew-tts/
 
-**Built by** [Darshan Tiwari](https://digitb.tech) (DigitB) · **Year:** Jan 2025 · **Full case study:** https://digitb.tech/case-study/hebrew-tts/
+> This repository is a write-up of an experiment, not a product. It contains the documentation, one training configuration and a small helper script. It does not contain audio, model weights, checkpoints or the narrator's text.
 
-> This repository documents the system: problem, architecture, model choices
-> and production setup. Source code is not published here.
+## Research question
 
-## Problem
-The publication ships a new English-language study piece every day, each about ten to eleven minutes read aloud. Recording a human narrator daily does not scale. The text is ordinary English prose except that it is saturated with transliterated Hebrew and Aramaic, Rambam, Moshiach, teshuvah, mitzvah, sichah, farbrengen, which the English grapheme-to-phoneme front end has never seen and will happily mangle. Two further constraints made this harder than a stock voice clone: the corpus that could be obtained was twelve minutes, not the one-and-a-half to two hours specified; and the failure mode that actually disqualifies a narration voice is drift over minutes, which no short-sample demo will reveal.
+Can a pretrained StyleTTS 2 checkpoint be fully fine-tuned on **12.4 minutes** of clean single-speaker audio, a tenth of the 1.5 to 2 hours the intake specification asked for, and still hold one voice, one pace and one intonation style across an **eleven-minute continuous generation**?
 
-## Data
-Source audio was scored before it was trusted: every candidate clip was normalised to 16 kHz mono via FFmpeg and run through WADA-SNR blind signal-to-noise estimation in a Colab notebook, with per-file scores listed next to an inline player so anything marginal could be heard rather than guessed at. What survived became 119 single-speaker clips at 24 kHz mono 16-bit, 12.4 minutes in total, median 5.4 s, range 1.6-14.0 s, split 108 train / 11 validation. Transcripts are not stored as text: each clip is paired with an espeak-ng IPA phoneme string carrying stress marks, in the pipe-delimited wav|phonemes|speaker_id format the trainer reads. A separate 141,433-line pool of phonemised LibriTTS train-clean-360 text supplies out-of-distribution sentences for the adversarial stage. Clips under the configured 50-frame minimum were dropped rather than padded.
+Two details make the question harder than a stock voice clone. The target text is English prose saturated with transliterated Hebrew and Aramaic words (Rambam, Moshiach, teshuvah, mitzvah, farbrengen) that the English grapheme-to-phoneme front end has no rules for. And the failure that disqualifies a narration voice is drift over minutes, which no short demo clip reveals.
 
-## Architecture
-PL-BERT encodes the phoneme sequence; a style diffusion module (3 transformer layers, 8 heads, 64 head-features, 10% embedding mask probability) samples a 128-dimensional style vector; duration and F0/energy predictors condition the acoustic path; a HiFi-GAN decoder produces 24 kHz waveform; and WavLM supplies an adversarial naturalness signal. Mel features are 80-bin at n_fft 2048, win 1200, hop 300. The fine-tune loads pretrained weights parameters-only, so no optimiser state carries over from the English run. The objective is a weighted sum dominated by the mel term at 5.0 and the CE term at 20.0, with duration, F0, style, monotonic-alignment, norm, sequence-to-sequence, diffusion and SLM terms all at 1.0. Training is staged, and the schedule is the load-bearing decision: monotonic alignment enters at epoch 10, style diffusion at epoch 20, the joint objective and SLM adversarial stage at epoch 30. Enabling everything from step zero on a corpus this size collapses the model.
+## Method
 
-```mermaid
-flowchart TD
-  n0["Daily study text<br/><small>English prose, transliterated Hebrew and Aramaic inline</small>"]
-  n1["Record + gate<br/><small>FFmpeg normalise, WADA-SNR score, listen to anything marginal</small>"]
-  n2["Segment + phonemise<br/><small>espeak-ng IPA, 108 train / 11 val lists</small>"]
-  n3["Load LibriTTS checkpoint<br/><small>parameters only, 771 MB, no optimiser state</small>"]
-  n4["Staged fine-tune<br/><small>TMA at 10, diffusion at 20, joint + SLM at 30</small>"]
-  n5["HiFi-GAN decode<br/><small>24 kHz mono, checkpoint chosen by listening</small>"]
-  n0 --> n1
-  n1 --> n2
-  n2 --> n3
-  n3 --> n4
-  n4 --> n5
-```
+The base is the public StyleTTS 2 LibriTTS checkpoint (upstream code: [yl4579/StyleTTS2](https://github.com/yl4579/StyleTTS2), MIT, not copied here). The fine-tune is a full second-stage run that loads weights only, so no optimiser state carries over from the English run.
 
-## Models evaluated
-| Model | Result | Why |
-|---|---|---|
-| StyleTTS 2 (full fine-tune) | kept | Full fine-tune from the LibriTTS checkpoint, 771 MB in, 2.25 GB out including optimiser state |
-| PL-BERT (phoneme-level BERT) | kept | 12 layers, 768 hidden, 178-token phoneme vocabulary, pretrained 1M steps on English Wikipedia |
-| HiFi-GAN decoder | kept | Upsample rates 10-5-3-2, product 300, exactly the mel hop length, the decoder reconstructs the frame rate it was given |
-| WavLM base+ (SLM discriminator) | kept | 13 layers at 16 kHz, providing the adversarial naturalness signal in the final stage |
-| JDC pitch extractor | kept | F0 supervision; without the lambda_F0 term the intonation contour flattens within a few epochs |
-| ASR-based aligner | kept | 80-mel input, 256 hidden, phased in at TMA_epoch 10 rather than from step zero |
-| VALL-E / one-shot codec cloning | discarded | Clones identity from seconds of audio, but holding one identity across eleven continuous minutes is exactly what it does not promise |
-| YourTTS (zero-shot adaptation) | discarded | The cheap route for a single target speaker; documented speaker-similarity ceiling is below what daily narration needs |
-| VITS | discarded | No pretrained checkpoint matching the target acoustic conditions, which removes the only reason the tiny corpus works |
-| Training from scratch | discarded | 12.4 minutes of audio. The pretrained checkpoint is carrying the entire prosody prior |
+- **Text side.** PL-BERT encodes an espeak-ng IPA phoneme sequence. Because the encoder is phoneme-level, an out-of-vocabulary loanword is still representable.
+- **Style.** A diffusion module samples a 128-dimensional style vector instead of fixing it, which is what stops delivery flattening.
+- **Acoustic path.** Duration and F0/energy predictors, a HiFi-GAN decoder at 24 kHz, and a WavLM base+ discriminator as an adversarial naturalness signal.
+- **Staging is the load-bearing decision.** Monotonic alignment enters at epoch 10, style diffusion at epoch 20, the joint objective and SLM adversarial stage at epoch 30. Switching everything on from step zero on a corpus this size collapses the model.
+- **Loss weights.** Mel 5.0, cross-entropy 20.0, all other terms 1.0. The adversarial stage is throttled (2% of batches, every 10 iterations, sequences of 400 to 500 frames, scale 0.01, divergence threshold 5) so a discriminator that starts winning cannot drag the generator down.
 
-## Production
-Two machines, two jobs. Corpus preparation ran in Google Colab on a T4, FFmpeg normalisation, WADA-SNR scoring, manual listening, because it is I/O-bound and interactive. Training ran on a rented RunPod GPU through JupyterLab, batch size 3, max sequence length 500, 36 steps per epoch. The full 100-epoch second-stage run took 6 hours 9 minutes wall clock. TensorBoard event files were written throughout; the 118 MB event file is the audio previews logged per validation pass, which is what actually gets listened to. Checkpoints were written every 50 epochs, and inference was driven from a notebook harness that reads the highest-numbered checkpoint and synthesises held-out sentences for A/B comparison. Output is 24 kHz mono.
+The shipped configuration is in [`code/configs/config_ft.yml`](code/configs/config_ft.yml). Detail: [docs/architecture.md](docs/architecture.md).
 
-## Results
-- **corpus:** 119 clips, 12.4 min, SNR-gated
-- **longest clean run:** 8 min 41 s in one pass, no stitching
+## Data specification
 
-## Stack
-Python / PyTorch, StyleTTS 2, PL-BERT, HiFi-GAN, WavLM (SLM adversarial), JDC pitch extraction, espeak-ng / phonemizer, NLTK, CUDA, RunPod (GPU training), Google Colab (corpus prep), JupyterLab, TensorBoard, Hugging Face Transformers, FFmpeg / WADA-SNR
+| Property | Value |
+|---|---|
+| Clips | 119 (108 train, 11 validation) |
+| Total duration | 12.4 min |
+| Clip length | median 5.4 s, range 1.6 to 14.0 s |
+| Format | 24 kHz, mono, 16-bit PCM, one speaker |
+| Transcript form | espeak-ng IPA with stress marks, `wav|phonemes|speaker_id` |
+| Minimum length | 50 frames, shorter clips dropped, never padded |
+| Out-of-distribution text | 141,433 phonemised LibriTTS train-clean-360 lines for the adversarial stage |
 
-## Contact
-Architecture reviews, builds and fixes: darshan@digitb.tech · https://digitb.tech
+Every candidate clip was converted to 16 kHz mono with FFmpeg and scored with WADA-SNR (blind SNR estimation, no clean reference) next to an inline player, so marginal files were listened to rather than guessed at. Detail: [docs/data.md](docs/data.md).
+
+## Training setup and schedule
+
+- Corpus preparation in Google Colab on a T4 (I/O-bound and interactive).
+- Training on a rented RunPod GPU through JupyterLab: batch size 3, max sequence length 500, 36 steps per epoch.
+- Optimiser: lr 1e-4, PL-BERT lr 1e-5, fine-tune lr 1e-4, weight decay 1e-4.
+- Two runs on 10 January 2025. First stage: 200 epochs, validation loss 0.895 to 0.555 (best 0.542 at epoch 189). Second stage: 100 epochs, validation loss 0.416 to 0.370, **6 h 9 min** wall clock (best 0.361 at epoch 68, not saved).
+- Checkpoints every 50 epochs; the final checkpoint was chosen by listening, not by loss. Detail: [docs/production.md](docs/production.md).
+
+![Training run in JupyterLab](docs/figures/training-run-jupyterlab.png)
+
+The style, diffusion and SLM terms read 0.00000 in epoch 1. That is the schedule, not a bug.
+
+## Results (as stated on digitb.tech)
+
+- **Corpus:** 119 clips, 12.4 min, SNR-gated.
+- **Longest clean run:** 8 min 41 s generated in one pass, no stitching. This was the acceptance test, chosen because style wander, identity drift, collapse toward monotone and pitch resets per paragraph only appear over minutes.
+- Validation loss stopped being informative by about epoch 40 while audio kept improving, so checkpoints were compared by listening, A/B, on held-out sentences.
+
+Result detail and the alternatives considered: [docs/models.md](docs/models.md).
+
+## Limitations
+
+- The corpus is 12.4 minutes, not the specified 1.5 to 2 hours. The result is for one speaker and one recording condition.
+- Pronunciation is not linguistically correct Hebrew. espeak-ng's English rules cannot produce the right sounds, and the training data has no Hebrew characters or guttural phonemes. What the model learns is to say English approximations **consistently**, in one voice, at the prosodic weight the narrator gives them.
+- The best validation loss (0.361, epoch 68) fell between 50-epoch saves and was never kept. The saved 0.370 checkpoint is within listening noise, but the save interval should have been tighter.
+- No listening panel. Acceptance was the author's listening to one long continuous generation; UTMOS and NISQA are named as the intended no-reference checks. No numbers from them are reported here.
+- The fine-tuned checkpoint is 2.25 GB because it carries optimiser state. Serving would first need a weights-only export.
+
+## Related research
+
+- [StyleTTS 2: Towards Human-Level Text-to-Speech](https://arxiv.org/abs/2306.07691) and [StyleTTS](https://arxiv.org/abs/2205.15439) (Li et al.), the method and its lineage.
+- PL-BERT, HiFi-GAN, WavLM, LibriTTS, Glow-TTS, FastSpeech 2, VITS, VALL-E, NaturalSpeech 2, YourTTS, UTMOS and NISQA, with links and the role each played, in [REFERENCES.md](REFERENCES.md).
+
+## Related research by DigitB
+
+Sibling work on image synthesis: [Chimera Studio](https://digitb.tech/case-study/chimera-studio/).
+
+## Repository contents
+
+| Path | Contents |
+|---|---|
+| `docs/architecture.md` | Components, staging schedule, data flow |
+| `docs/data.md` | Corpus, SNR gate, transcript format, preprocessing |
+| `docs/models.md` | Models kept and discarded, evaluation method and results |
+| `docs/production.md` | Compute, run timings, checkpoints, serving notes |
+| `docs/figures/` | Two screenshots: training run, Colab SNR routine |
+| `code/tools/rename_clips.py` | Sequential clip renaming helper |
+| `code/configs/config_ft.yml` | Second-stage fine-tuning configuration (relative paths) |
+| `code/notebooks/StyleTTS2_Full_Fine-Tuning.ipynb` | Data preparation, training and synthesis notebook (outputs cleared) |
+| `code/notebooks/inference.ipynb` | Inference notebook (outputs cleared) |
+| `code/notebooks/test.ipynb` | Transcript extraction, subtitle-to-label conversion and clip renaming utilities (outputs cleared) |
+| `REFERENCES.md` | Papers, models, tools |
+
+### Running the code
+
+No credentials or environment variables are required. Install the upstream [yl4579/StyleTTS2](https://github.com/yl4579/StyleTTS2) requirements (not copied here), place the prepared 24 kHz clips and train/validation lists where `config_ft.yml` points, then run the fine-tuning notebook on a GPU (Colab or a rented instance) or train with the upstream `train_finetune.py --config_path code/configs/config_ft.yml`. The sample text in the synthesis cell is a placeholder.
+
+Contact: darshan@digitb.tech · https://digitb.tech
